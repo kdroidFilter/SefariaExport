@@ -1,7 +1,6 @@
-name: Python 3.9 + MongoDB + Sefaria Export (Manual)
+name: Python 3.9 + MongoDB + Sefaria Export (Manual, GCS dump)
 
 on:
-  # Manual trigger from the Actions tab
   workflow_dispatch:
     inputs:
       export_function:
@@ -13,7 +12,6 @@ on:
         required: false
         default: "Asia/Jerusalem"
 
-# Needed to create a release
 permissions:
   contents: write
 
@@ -26,7 +24,6 @@ jobs:
         image: mongo:6.0
         ports:
           - 27017:27017
-        # Healthcheck runs inside the container; Actions will wait for 'healthy'
         options: >-
           --health-cmd="mongosh --eval 'db.runCommand({ ping: 1 })'"
           --health-interval=10s
@@ -34,14 +31,10 @@ jobs:
           --health-retries=20
 
     env:
-      # Resolve inputs (fallbacks for manual run)
       EXPORT_FUNCTION: ${{ inputs.export_function || 'export_all' }}
       TZ_NAME: ${{ inputs.timezone || 'Asia/Jerusalem' }}
-      # Django needs this to load the project settings
       DJANGO_SETTINGS_MODULE: sefaria.settings
-      # Local export folder used by export.py via settings
       SEFARIA_EXPORT_PATH: ${{ github.workspace }}/exports
-      # Mongo connection (DB "sefaria" comes from the dump)
       MONGO_HOST: 127.0.0.1
       MONGO_PORT: 27017
       MONGO_DB_NAME: sefaria
@@ -68,7 +61,7 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-      - name: Install system helpers (wget, tar, zip, nc)
+      - name: Install system helpers
         run: |
           sudo apt-get update
           sudo apt-get install -y wget ca-certificates zip netcat-openbsd
@@ -81,12 +74,12 @@ jobs:
           sudo mv mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}/bin/* /usr/local/bin/
           mongorestore --version
 
-      - name: Clone Sefaria-Project
+      - name: Clone Sefaria-Project (main repo, contains sefaria/export.py)
         run: |
           git clone --depth 1 https://github.com/Sefaria/Sefaria-Project.git
           ls -la Sefaria-Project
 
-      # ---- google-re2 robustness block ----
+      # ---- Robust install wrt google-re2 (avoid Bazel build) ----
       - name: Install system build deps for google-re2 (no Bazel path)
         run: |
           sudo apt-get update
@@ -111,15 +104,13 @@ jobs:
         working-directory: Sefaria-Project
         run: |
           echo "Primary install failed — trying built-google-re2 fallback..."
-          # Install everything except google-re2
           grep -viE '^\s*google-re2(\b|==|>=|<|~=|!=)' requirements.txt > req-no-re2.txt || true
           python -m pip install --upgrade pip setuptools wheel
           pip install -r req-no-re2.txt
-          # Install drop-in wheels for re2
           pip install built-google-re2
       # ---- end google-re2 block ----
 
-      - name: Create minimal local_settings.py
+      - name: Create minimal local_settings.py for CI
         working-directory: Sefaria-Project/sefaria
         run: |
           cp local_settings_example.py local_settings.py
@@ -146,12 +137,20 @@ jobs:
             echo "⏳ Waiting for MongoDB TCP..."; sleep 2
           done
 
-      - name: Fetch official dump (Sefaria-Export) and restore
+      - name: Download small Mongo dump (GCS) and extract
         run: |
-          git clone --depth 1 https://github.com/Sefaria/Sefaria-Export.git
-          mongorestore --host 127.0.0.1 --port 27017 --drop Sefaria-Export/dump
+          mkdir -p mongo_dump
+          wget -O dump_small.tar.gz https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz
+          tar -xzf dump_small.tar.gz -C mongo_dump
+          # Show structure for debugging
+          find mongo_dump | sed -e 's/^/  /'
 
-      - name: Run export function
+      - name: Restore database from dump_small
+        run: |
+          # The dump contains the db and collections; --drop to replace any existing data
+          mongorestore --host 127.0.0.1 --port 27017 --drop mongo_dump
+
+      - name: Run export function (from Sefaria-Project/sefaria/export.py)
         working-directory: Sefaria-Project
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
@@ -165,7 +164,6 @@ jobs:
           os.environ.setdefault("SEFARIA_EXPORT_PATH", os.environ.get("SEFARIA_EXPORT_PATH"))
           django.setup()
           from sefaria import export as ex
-
           fn = os.environ.get("EXPORT_FUNCTION","export_all").strip()
           allowed = {
             "export_all": ex.export_all,
