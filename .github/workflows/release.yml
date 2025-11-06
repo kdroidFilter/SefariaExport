@@ -273,6 +273,7 @@ jobs:
           tag_name: ${{ steps.ts.outputs.stamp }}
           name: ${{ steps.ts.outputs.stamp }}
           files: ${{ steps.parts.outputs.files }}
+          overwrite_files: false
           body: |
             Automated Sefaria export (${{ env.EXPORT_FUNCTION }}) generated at ${{ env.TZ_NAME }} time: ${{ steps.ts.outputs.stamp }}.
 
