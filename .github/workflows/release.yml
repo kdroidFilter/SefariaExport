@@ -124,18 +124,18 @@ jobs:
         run: |
           cp local_settings_example.py local_settings.py
           python - <<'PY'
-import os, re
-p = "local_settings.py"
-with open(p, "r", encoding="utf-8") as f:
-    s = f.read()
-s = re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"', s)
-s = re.sub(r"MONGO_HOST\s*=.*", f'MONGO_HOST = "{os.environ["MONGO_HOST"]}"', s)
-s = re.sub(r"MONGO_PORT\s*=.*", f'MONGO_PORT = {int(os.environ["MONGO_PORT"])}', s)
-s = re.sub(r"MONGO_DB_NAME\s*=.*", f'MONGO_DB_NAME = "{os.environ["MONGO_DB_NAME"]}"', s)
-with open(p, "w", encoding="utf-8") as f:
-    f.write(s)
-print("local_settings.py written with CI values")
-PY
+          import os, re
+          p = "local_settings.py"
+          with open(p, "r", encoding="utf-8") as f:
+              s = f.read()
+          s = re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"', s)
+          s = re.sub(r"MONGO_HOST\s*=.*", f'MONGO_HOST = "{os.environ["MONGO_HOST"]}"', s)
+          s = re.sub(r"MONGO_PORT\s*=.*", f'MONGO_PORT = {int(os.environ["MONGO_PORT"])}', s)
+          s = re.sub(r"MONGO_DB_NAME\s*=.*", f'MONGO_DB_NAME = "{os.environ["MONGO_DB_NAME"]}"', s)
+          with open(p, "w", encoding="utf-8") as f:
+              f.write(s)
+          print("local_settings.py written with CI values")
+          PY
 
       - name: Wait for MongoDB TCP (extra safety)
         run: |
@@ -159,28 +159,28 @@ PY
           mkdir -p "$SEFARIA_EXPORT_PATH"
           echo "Requested export function: $EXPORT_FUNCTION"
           python - <<'PY'
-import os, sys, django
-sys.path.insert(0, os.path.abspath("."))
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
-os.environ.setdefault("SEFARIA_EXPORT_PATH", os.environ.get("SEFARIA_EXPORT_PATH"))
-django.setup()
-from sefaria import export as ex
+          import os, sys, django
+          sys.path.insert(0, os.path.abspath("."))
+          os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
+          os.environ.setdefault("SEFARIA_EXPORT_PATH", os.environ.get("SEFARIA_EXPORT_PATH"))
+          django.setup()
+          from sefaria import export as ex
 
-fn = os.environ.get("EXPORT_FUNCTION","export_all").strip()
-allowed = {
-  "export_all": ex.export_all,
-  "export_texts": ex.export_texts,
-  "export_all_merged": ex.export_all_merged,
-  "export_links": ex.export_links,
-  "export_schemas": ex.export_schemas,
-  "export_toc": ex.export_toc,
-  "export_topic_graph": ex.export_topic_graph,
-}
-if fn not in allowed:
-    raise SystemExit(f"Unknown export function: {fn}")
-allowed[fn]()
-print(f"✅ {fn} completed.")
-PY
+          fn = os.environ.get("EXPORT_FUNCTION","export_all").strip()
+          allowed = {
+            "export_all": ex.export_all,
+            "export_texts": ex.export_texts,
+            "export_all_merged": ex.export_all_merged,
+            "export_links": ex.export_links,
+            "export_schemas": ex.export_schemas,
+            "export_toc": ex.export_toc,
+            "export_topic_graph": ex.export_topic_graph,
+          }
+          if fn not in allowed:
+              raise SystemExit(f"Unknown export function: {fn}")
+          allowed[fn]()
+          print(f"✅ {fn} completed.")
+          PY
           echo "Exported content path: $SEFARIA_EXPORT_PATH"
           ls -la "$SEFARIA_EXPORT_PATH" || true
 
