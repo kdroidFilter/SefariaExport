@@ -107,7 +107,7 @@ jobs:
           pip install -r req-no-re2.txt
           pip install built-google-re2
 
-      - name: Create minimal local_settings.py for CI
+      - name: Create minimal local_settings.py for CI (sets SEFARIA_DB!)
         working-directory: Sefaria-Project/sefaria
         run: |
           cp local_settings_example.py local_settings.py
@@ -116,13 +116,19 @@ jobs:
           p = "local_settings.py"
           with open(p, "r", encoding="utf-8") as f:
               s = f.read()
+          # Ensure export path and Mongo connection
           s = re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"', s)
           s = re.sub(r"MONGO_HOST\s*=.*", f'MONGO_HOST = "{os.environ["MONGO_HOST"]}"', s)
           s = re.sub(r"MONGO_PORT\s*=.*", f'MONGO_PORT = {int(os.environ["MONGO_PORT"])}', s)
           s = re.sub(r"MONGO_DB_NAME\s*=.*", f'MONGO_DB_NAME = "{os.environ["MONGO_DB_NAME"]}"', s)
+          # Critical: make sure SEFARIA_DB is defined and matches the restored DB
+          if re.search(r"SEFARIA_DB\s*=", s):
+              s = re.sub(r"SEFARIA_DB\s*=.*", 'SEFARIA_DB = "sefaria"', s)
+          else:
+              s += '\nSEFARIA_DB = "sefaria"\n'
           with open(p, "w", encoding="utf-8") as f:
               f.write(s)
-          print("✅ local_settings.py configured")
+          print("✅ local_settings.py configured (SEFARIA_DB=sefaria)")
           PY
 
       - name: Wait for MongoDB TCP (safety)
@@ -139,11 +145,23 @@ jobs:
           mkdir -p mongo_dump
           aria2c -x 16 -s 16 -k 1M -o dump_small.tar.gz "https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz"
           tar -xzf dump_small.tar.gz -C mongo_dump
-          find mongo_dump | sed -e 's/^/  /'
+          echo "Dump tree:"
+          find mongo_dump -maxdepth 3 | sed -e 's/^/  /'
 
-      - name: Restore database from dump_small
+      - name: Restore database from dump_small (detect correct dir) + create empty history
         run: |
-          mongorestore --host 127.0.0.1 --port 27017 --drop mongo_dump
+          # Find the folder that directly contains the 'sefaria' DB dump
+          # Common layouts: mongo_dump/dump/sefaria or mongo_dump/sefaria
+          DUMP_DIR="$( \
+            if [ -d mongo_dump/dump/sefaria ]; then echo mongo_dump/dump; \
+            elif [ -d mongo_dump/sefaria ]; then echo mongo_dump; \
+            else echo mongo_dump; fi )"
+          echo "Using dump dir: $DUMP_DIR"
+          # Restore only the 'sefaria' database from that directory
+          mongorestore --host 127.0.0.1 --port 27017 --drop --db sefaria "$DUMP_DIR/sefaria"
+          # For dump_small, ensure an empty 'history' collection exists
+          mongosh --quiet --eval 'db.getSiblingDB("sefaria").createCollection("history"); print("Ensured empty history collection")'
+          echo "✅ Mongo restore complete."
 
       - name: Run export function
         working-directory: Sefaria-Project
