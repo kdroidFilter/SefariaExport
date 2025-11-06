@@ -159,9 +159,19 @@ jobs:
           echo "Using dump dir: $DUMP_DIR"
           # Restore only the 'sefaria' database from that directory
           mongorestore --host 127.0.0.1 --port 27017 --drop --db sefaria "$DUMP_DIR/sefaria"
-          # For dump_small, ensure an empty 'history' collection exists
-          mongosh --quiet --eval 'db.getSiblingDB("sefaria").createCollection("history"); print("Ensured empty history collection")'
+          # Create empty 'history' collection (dump_small requires it)
+          python - <<'PY'
+          from pymongo import MongoClient, errors
+          client = MongoClient("mongodb://127.0.0.1:27017")
+          db = client["sefaria"]
+          try:
+              db.create_collection("history")
+              print("Created empty 'history' collection.")
+          except errors.CollectionInvalid:
+              print("'history' collection already exists.")
+          PY
           echo "✅ Mongo restore complete."
+
 
       - name: Run export function
         working-directory: Sefaria-Project
