@@ -150,6 +150,14 @@ jobs:
           echo "Dump tree:"
           find mongo_dump -maxdepth 3 | sed -e 's/^/  /'
 
+
+      - name: Pre-clean big SDKs/caches (free disk)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo rm -rf ~/.cache/pip || true
+          df -h
+
+
       - name: Restore database from dump_small (detect dir) + create empty history + cleanup dump
         run: |
           # Locate directory holding 'sefaria' DB dump
