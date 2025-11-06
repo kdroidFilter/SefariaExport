@@ -1,4 +1,4 @@
-name: Python 3.9 + MongoDB + Sefaria Export (Manual, GCS dump)
+name: Python 3.9 + MongoDB + Sefaria Export (Manual, fast aria2c)
 
 on:
   workflow_dispatch:
@@ -48,7 +48,7 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Verify Python & pip versions (debug)
+      - name: Verify Python & pip versions
         run: |
           python -V
           which python
@@ -61,10 +61,10 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-      - name: Install system helpers
+      - name: Install system helpers (aria2, wget, zip, nc)
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget ca-certificates zip netcat-openbsd
+          sudo apt-get install -y aria2 wget ca-certificates zip netcat-openbsd
 
       - name: Install MongoDB Database Tools (mongorestore)
         run: |
@@ -79,19 +79,18 @@ jobs:
           git clone --depth 1 https://github.com/Sefaria/Sefaria-Project.git
           ls -la Sefaria-Project
 
-      # ---- Robust install wrt google-re2 (avoid Bazel build) ----
-      - name: Install system build deps for google-re2 (no Bazel path)
+      # Handle google-re2 build gracefully
+      - name: Install system build deps for google-re2
         run: |
           sudo apt-get update
           sudo apt-get install -y libre2-dev pybind11-dev build-essential cmake ninja-build
 
-      - name: Prepare constraints (pin google-re2 to 1.0)
+      - name: Pin google-re2==1.0 for compatibility
         working-directory: Sefaria-Project
         run: |
           echo "google-re2==1.0" > constraints-ci.txt
-          cat constraints-ci.txt
 
-      - name: Install Python deps of Sefaria-Project (with constraints)
+      - name: Install Python deps with constraints
         id: pip_install
         continue-on-error: true
         working-directory: Sefaria-Project
@@ -99,16 +98,14 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           pip install -r requirements.txt -c constraints-ci.txt
 
-      - name: Fallback replace google-re2 with built-google-re2 (if previous step failed)
+      - name: Fallback install built-google-re2 if needed
         if: ${{ steps.pip_install.outcome == 'failure' }}
         working-directory: Sefaria-Project
         run: |
           echo "Primary install failed — trying built-google-re2 fallback..."
-          grep -viE '^\s*google-re2(\b|==|>=|<|~=|!=)' requirements.txt > req-no-re2.txt || true
-          python -m pip install --upgrade pip setuptools wheel
+          grep -viE '^\s*google-re2' requirements.txt > req-no-re2.txt || true
           pip install -r req-no-re2.txt
           pip install built-google-re2
-      # ---- end google-re2 block ----
 
       - name: Create minimal local_settings.py for CI
         working-directory: Sefaria-Project/sefaria
@@ -125,10 +122,10 @@ jobs:
           s = re.sub(r"MONGO_DB_NAME\s*=.*", f'MONGO_DB_NAME = "{os.environ["MONGO_DB_NAME"]}"', s)
           with open(p, "w", encoding="utf-8") as f:
               f.write(s)
-          print("local_settings.py written with CI values")
+          print("✅ local_settings.py configured")
           PY
 
-      - name: Wait for MongoDB TCP (extra safety)
+      - name: Wait for MongoDB TCP (safety)
         run: |
           for i in {1..60}; do
             if nc -z 127.0.0.1 27017; then
@@ -137,26 +134,24 @@ jobs:
             echo "⏳ Waiting for MongoDB TCP..."; sleep 2
           done
 
-      - name: Download small Mongo dump (GCS) and extract
+      - name: Download small Mongo dump (via aria2c)
         run: |
           mkdir -p mongo_dump
-          wget -O dump_small.tar.gz https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz
+          aria2c -x 16 -s 16 -k 1M -o dump_small.tar.gz "https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz"
           tar -xzf dump_small.tar.gz -C mongo_dump
-          # Show structure for debugging
           find mongo_dump | sed -e 's/^/  /'
 
       - name: Restore database from dump_small
         run: |
-          # The dump contains the db and collections; --drop to replace any existing data
           mongorestore --host 127.0.0.1 --port 27017 --drop mongo_dump
 
-      - name: Run export function (from Sefaria-Project/sefaria/export.py)
+      - name: Run export function
         working-directory: Sefaria-Project
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
         run: |
           mkdir -p "$SEFARIA_EXPORT_PATH"
-          echo "Requested export function: $EXPORT_FUNCTION"
+          echo "Running export: $EXPORT_FUNCTION"
           python - <<'PY'
           import os, sys, django
           sys.path.insert(0, os.path.abspath("."))
@@ -164,7 +159,7 @@ jobs:
           os.environ.setdefault("SEFARIA_EXPORT_PATH", os.environ.get("SEFARIA_EXPORT_PATH"))
           django.setup()
           from sefaria import export as ex
-          fn = os.environ.get("EXPORT_FUNCTION","export_all").strip()
+          fn = os.environ.get("EXPORT_FUNCTION", "export_all").strip()
           allowed = {
             "export_all": ex.export_all,
             "export_texts": ex.export_texts,
@@ -177,17 +172,14 @@ jobs:
           if fn not in allowed:
               raise SystemExit(f"Unknown export function: {fn}")
           allowed[fn]()
-          print(f"✅ {fn} completed.")
+          print(f"✅ {fn} completed successfully.")
           PY
-          echo "Exported content path: $SEFARIA_EXPORT_PATH"
-          ls -la "$SEFARIA_EXPORT_PATH" || true
 
-      - name: Compute release timestamp (from input timezone)
+      - name: Compute release timestamp
         id: ts
         run: |
           TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M' > ts.txt
           echo "stamp=$(cat ts.txt)" >> $GITHUB_OUTPUT
-          echo "Release timestamp (${TZ_NAME}): $(cat ts.txt)"
 
       - name: Zip exports
         id: zip
@@ -205,7 +197,7 @@ jobs:
           name: ${{ steps.zip.outputs.zip_name }}
           path: ${{ env.ZIP_PATH }}
 
-      - name: Create GitHub Release (tag = date-hour; name = date-hour)
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ts.outputs.stamp }}
