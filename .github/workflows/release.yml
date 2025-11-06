@@ -215,6 +215,20 @@ jobs:
           print(f"✅ {fn} completed successfully.")
           PY
 
+      - name: Cleanup MongoDB database after export (free space)
+        run: |
+          echo "🗑️ Dropping MongoDB database 'sefaria' to free up space..."
+          mongosh --quiet --eval 'db.getSiblingDB("sefaria").dropDatabase(); print("✅ Database dropped.")' || \
+          python - <<'PY'
+          from pymongo import MongoClient
+          client = MongoClient("mongodb://127.0.0.1:27017")
+          client.drop_database("sefaria")
+          print("✅ Database dropped via PyMongo fallback.")
+          PY
+          echo "Disk usage after cleanup:"
+          df -h
+
+
       - name: Compute release timestamp
         id: ts
         run: |
