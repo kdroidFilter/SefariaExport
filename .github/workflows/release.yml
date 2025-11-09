@@ -17,6 +17,7 @@ env:
   MONGO_HOST: 127.0.0.1
   MONGO_PORT: 27017
   MONGO_DB_NAME: sefaria
+  PYTHONDONTWRITEBYTECODE: 1
 
 jobs:
   prep:
@@ -73,17 +74,16 @@ jobs:
           which python
           pip -V
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
-
       - name: Install system helpers (aria2, tar, wget, nc)
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 ca-certificates tar wget netcat-openbsd
+
+      - name: Pre-clean big SDKs/caches (free disk early)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo rm -rf ~/.cache/pip || true
+          df -h
 
       - name: Install MongoDB Database Tools (mongorestore)
         run: |
@@ -92,6 +92,7 @@ jobs:
           tar -xzf mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}.tgz
           sudo mv mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}/bin/* /usr/local/bin/
           mongorestore --version
+          rm -rf mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER} mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}.tgz || true
 
       - name: Clone Sefaria-Project (main repo, contains sefaria/export.py)
         run: |
@@ -114,7 +115,7 @@ jobs:
         working-directory: Sefaria-Project
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt -c constraints-ci.txt
+          pip install --no-cache-dir -r requirements.txt -c constraints-ci.txt
 
       - name: Fallback install built-google-re2 if needed
         if: ${{ steps.pip_install.outcome == 'failure' }}
@@ -122,8 +123,8 @@ jobs:
         run: |
           echo "Primary install failed — trying built-google-re2 fallback..."
           grep -viE '^\s*google-re2' requirements.txt > req-no-re2.txt || true
-          pip install -r req-no-re2.txt
-          pip install built-google-re2
+          pip install --no-cache-dir -r req-no-re2.txt
+          pip install --no-cache-dir built-google-re2
 
       - name: Create minimal local_settings.py for CI (sets SEFARIA_DB!)
         working-directory: Sefaria-Project/sefaria
@@ -163,6 +164,7 @@ jobs:
           mkdir -p mongo_dump
           aria2c -x 16 -s 16 -k 1M -o dump_small.tar.gz "https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz"
           tar -xzf dump_small.tar.gz -C mongo_dump
+          rm -f dump_small.tar.gz || true
           echo "Dump tree:"
           find mongo_dump -maxdepth 3 | sed -e 's/^/  /'
 
@@ -179,13 +181,15 @@ jobs:
           echo "Packaged tree:"
           find mongo_dump_pkg -maxdepth 2 | sed -e 's/^/  /'
 
-      - name: Restore DB once and run all exports sequentially
+      - name: Restore DB once and run all exports sequentially (free space as we go)
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
         run: |
           set -euo pipefail
           BASE="$SEFARIA_EXPORT_BASE"
           mkdir -p "$BASE"
+          FINAL_DIR="$RUNNER_TEMP/final_root"
+          mkdir -p "$FINAL_DIR"
           # Restore DB once from dump
           if [ ! -d mongo_dump_pkg/sefaria ]; then
             echo "❌ mongo_dump_pkg/sefaria not found"; exit 1
@@ -241,9 +245,13 @@ jobs:
             allowed[fn]()
             print(f"✅ {fn} completed successfully.")
             PY
+
+            # Move export into FINAL_DIR and free per-export staging
+            rsync -a "$DEST_DIR/" "$FINAL_DIR/" || cp -a "$DEST_DIR/." "$FINAL_DIR/"
+            rm -rf "$DEST_DIR"
           done
 
-      - name: Drop DB before final push (free space)
+      - name: Drop DB and cleanup before final push (free space)
         run: |
           echo "🗑️ Dropping MongoDB database 'sefaria' to free up space before push..."
           mongosh --quiet --eval 'db.getSiblingDB("sefaria").dropDatabase(); print("✅ Database dropped.")' || \
@@ -253,6 +261,11 @@ jobs:
           client.drop_database("sefaria")
           print("✅ Database dropped via PyMongo fallback.")
           PY
+          # Remove build trees and dumps to free disk
+          rm -rf mongo_dump mongo_dump_pkg Sefaria-Project || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          rm -rf ~/.cache/pip || true
           echo "Disk usage after cleanup:"
           df -h
 
@@ -273,11 +286,8 @@ jobs:
           mkdir -p "$REPO_DIR/.github"
           cp -a "$GITHUB_WORKSPACE/.github/." "$REPO_DIR/.github/"
           # Copy exported content directly into repo root
-          for d in export_links export_schemas export_toc export_all_merged; do
-            if [ -d "$SEFARIA_EXPORT_BASE/$d" ]; then
-              cp -a "$SEFARIA_EXPORT_BASE/$d/." "$REPO_DIR/"
-            fi
-          done
+          FINAL_DIR="$RUNNER_TEMP/final_root"
+          cp -a "$FINAL_DIR/." "$REPO_DIR/"
           cd "$REPO_DIR"
           git add -A
           if git diff --cached --quiet; then
