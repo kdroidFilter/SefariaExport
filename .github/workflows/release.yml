@@ -139,6 +139,10 @@ jobs:
           print("✅ local_settings.py configured")
           print(f"   SEFARIA_EXPORT_PATH = {export_base}")
           PY
+          
+          echo ""
+          echo "📄 Checking local_settings.py content:"
+          grep -E "(SEFARIA_EXPORT_PATH|MONGO_HOST|MONGO_PORT|SEFARIA_DB)" local_settings.py || true
 
       - name: Wait for MongoDB TCP
         run: |
@@ -167,11 +171,24 @@ jobs:
           PY
           echo "✅ Mongo restore complete."
 
+      - name: Check export module available
+        working-directory: Sefaria-Project
+        run: |
+          export PYTHONPATH="${{ github.workspace }}/Sefaria-Project"
+          python -c "
+          import sys, os, django
+          sys.path.insert(0, '.')
+          os.environ['DJANGO_SETTINGS_MODULE'] = 'sefaria.settings'
+          django.setup()
+          from sefaria import export
+          print('✅ Export module loaded')
+          print('📋 Available functions:', dir(export))
+          " || echo "❌ Failed to load export module"
+
       - name: Run export functions
         working-directory: Sefaria-Project
         run: |
           export PYTHONPATH="${{ github.workspace }}/Sefaria-Project"
-          export SEFARIA_EXPORT_PATH="${{ github.workspace }}/exports"
           
           python - <<'PY'
           import os, sys, django
@@ -180,13 +197,17 @@ jobs:
           os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
           
           # S'assurer que SEFARIA_EXPORT_PATH est défini
-          export_base = os.environ.get("SEFARIA_EXPORT_PATH")
-          if not export_base:
-              raise RuntimeError("SEFARIA_EXPORT_PATH is not set")
+          export_base = "${{ github.workspace }}/exports"
+          os.environ["SEFARIA_EXPORT_PATH"] = export_base
           
           print(f"📁 Export base directory: {export_base}")
+          print(f"📁 Current working directory: {os.getcwd()}")
           
           django.setup()
+          
+          # Vérifier les settings
+          from django.conf import settings
+          print(f"📋 Django SEFARIA_EXPORT_PATH: {getattr(settings, 'SEFARIA_EXPORT_PATH', 'NOT SET')}")
           
           from sefaria import export as ex
           
@@ -198,30 +219,60 @@ jobs:
           ]
           
           for fn_name, fn_callable in functions_to_run:
-              print(f"\n▶️  Running {fn_name}...")
+              print(f"\n{'='*60}")
+              print(f"▶️  Running {fn_name}...")
+              print(f"{'='*60}")
               try:
                   fn_callable()
                   print(f"✅ {fn_name} completed")
+                  
+                  # Lister ce qui a été créé
+                  print(f"📂 Contents of {export_base} after {fn_name}:")
+                  for root, dirs, files in os.walk(export_base):
+                      level = root.replace(export_base, '').count(os.sep)
+                      indent = ' ' * 2 * level
+                      print(f'{indent}{os.path.basename(root)}/')
+                      subindent = ' ' * 2 * (level + 1)
+                      for file in files[:10]:  # Limiter à 10 fichiers par répertoire
+                          print(f'{subindent}{file}')
+                      if len(files) > 10:
+                          print(f'{subindent}... and {len(files) - 10} more files')
+                      if level > 2:  # Limiter la profondeur
+                          break
+                  
               except Exception as e:
                   print(f"❌ {fn_name} failed: {e}")
+                  import traceback
+                  traceback.print_exc()
                   raise
           
           print("\n✅ All exports completed successfully")
           PY
 
-      - name: Verify exports were created
+      - name: Detailed export verification
         run: |
-          echo "📁 Checking export directory contents:"
-          ls -lah "${{ github.workspace }}/exports" || echo "❌ exports directory not found"
-          find "${{ github.workspace }}/exports" -type d -maxdepth 2 || true
-          find "${{ github.workspace }}/exports" -type f | head -20 || true
+          echo "📁 Full tree of exports directory:"
+          tree -L 3 "${{ github.workspace }}/exports" || find "${{ github.workspace }}/exports" -type d | head -30
+          
+          echo ""
+          echo "📊 Export directory size:"
+          du -sh "${{ github.workspace }}/exports"
+          du -sh "${{ github.workspace }}/exports"/* 2>/dev/null || echo "No subdirectories"
+          
+          echo ""
+          echo "📄 File count:"
+          find "${{ github.workspace }}/exports" -type f | wc -l
+          
+          echo ""
+          echo "📝 First 20 files:"
+          find "${{ github.workspace }}/exports" -type f | head -20
 
       - name: Drop DB (free space)
         run: |
           mongosh --quiet --eval 'db.getSiblingDB("sefaria").dropDatabase(); print("✅ DB dropped.")' || true
           df -h
 
-      - name: Build ONE combined tar.zst (flattened to root)
+      - name: Build combined tar.zst from exports directory
         env:
           TS_STAMP: ${{ steps.ts.outputs.stamp }}
         run: |
@@ -229,31 +280,21 @@ jobs:
           cd "${{ github.workspace }}"
           COMBINED="sefaria-exports-${TS_STAMP}.tar.zst"
           
-          # Vérifier quels répertoires d'export existent
-          EXPORT_DIRS=()
-          for dir in export_all_merged export_links export_schemas export_toc; do
-            if [ -d "exports/${dir}" ] && [ -n "$(ls -A exports/${dir} 2>/dev/null)" ]; then
-              EXPORT_DIRS+=("${dir}")
-              echo "✅ Found: exports/${dir}"
-            else
-              echo "⚠️  Missing or empty: exports/${dir}"
-            fi
-          done
+          # Vérifier que le répertoire exports contient des fichiers
+          FILE_COUNT=$(find exports -type f 2>/dev/null | wc -l)
+          echo "📊 Found ${FILE_COUNT} files in exports/"
           
-          if [ "${#EXPORT_DIRS[@]}" -eq 0 ]; then
-            echo "❌ No export directories found!"
+          if [ "${FILE_COUNT}" -eq 0 ]; then
+            echo "❌ No files found in exports directory!"
             exit 1
           fi
           
-          # Créer le tar avec seulement les répertoires qui existent
-          TAR_CMD="tar -cf -"
-          for dir in "${EXPORT_DIRS[@]}"; do
-            TAR_CMD+=" -C exports/${dir} ."
-          done
+          # Archiver tout le contenu du répertoire exports
+          echo "📦 Creating archive from exports/ directory..."
+          tar -cf - -C exports . | zstd --ultra -22 -T0 -o "${COMBINED}"
           
-          echo "📦 Creating archive with: ${EXPORT_DIRS[*]}"
-          eval "${TAR_CMD}" | zstd --ultra -22 -T0 -o "${COMBINED}"
           ls -lh "${COMBINED}"
+          echo "✅ Archive created: ${COMBINED}"
 
       - name: Split archive into <2GB parts
         env:
@@ -295,7 +336,7 @@ jobs:
         run: |
           TAG="${TS_STAMP}"
           TITLE="Sefaria Export ${TS_STAMP}"
-          NOTES=$'Combined Sefaria exports (zstd --ultra -22 -T0).\n\nContents are flattened at archive root from:\n- export_all_merged\n- export_links\n- export_schemas\n- export_toc\n\nRestore:\n  # if split into parts\n  cat sefaria-exports-'"${TS_STAMP}"'.tar.zst.part-* > combined.tar.zst && tar --zstd -xf combined.tar.zst\n  # if single file\n  tar --zstd -xf sefaria-exports-'"${TS_STAMP}"'.tar.zst'
+          NOTES=$'Combined Sefaria exports (zstd --ultra -22 -T0).\n\nRestore:\n  # if split into parts\n  cat sefaria-exports-'"${TS_STAMP}"'.tar.zst.part-* > combined.tar.zst && tar --zstd -xf combined.tar.zst\n  # if single file\n  tar --zstd -xf sefaria-exports-'"${TS_STAMP}"'.tar.zst'
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" -t "$TITLE" -n "$NOTES"
 
       - name: Upload parts (or single file)
