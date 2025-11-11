@@ -1,4 +1,4 @@
-name: Python 3.9 + MongoDB + Sefaria Export (Self-hosted, all_merged → date-branch)
+name: Python 3.9 + MongoDB + Sefaria export_all_merged (Self-hosted, Docker, push branch)
 
 on:
   workflow_dispatch:
@@ -30,25 +30,24 @@ jobs:
     outputs:
       stamp: ${{ steps.ts.outputs.stamp }}
     steps:
-      - name: Compute release timestamp
-        id: ts
+      - id: ts
+        name: Compute release timestamp
         run: |
           set -euo pipefail
           TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M' > ts.txt
           echo "stamp=$(cat ts.txt)" >> "$GITHUB_OUTPUT"
-          echo "⏱  Using TZ=${TZ_NAME} -> $(cat ts.txt)"
+          echo "⏱ TZ=${TZ_NAME} -> $(cat ts.txt)"
 
   export_and_push:
-    name: Export export_all_merged and push to date branch
+    name: export_all_merged → push to date branch (root)
     runs-on: [self-hosted, Linux, X64]
     needs: prep
     env:
       TS_STAMP: ${{ needs.prep.outputs.stamp }}
       SEFARIA_EXPORT_BASE: ${{ github.workspace }}/staging
       SEFARIA_EXPORT_PATH: ${{ github.workspace }}/staging
-
     steps:
-      - name: Checkout .github (sparse)
+      - name: Checkout .github (sparse only)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -57,66 +56,61 @@ jobs:
             .github
           sparse-checkout-cone-mode: false
 
-      - name: Ensure base packages & tools (Ubuntu/Debian)
+      - name: Ensure base tools & Python 3.9 + venv with system-site-packages
         run: |
           set -euo pipefail
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -y
-            sudo apt-get install -y --no-install-recommends \
-              ca-certificates tar wget curl rsync coreutils netcat-openbsd \
-              build-essential cmake ninja-build pybind11-dev libre2-dev \
-              git jq
+            # outils de base
+            sudo apt-get install -y ca-certificates tar wget rsync curl git netcat-openbsd coreutils
+            sudo apt-get install -y build-essential cmake ninja-build pkg-config libpq-dev
+            # Python 3.9 et venv + re2 côté système
+            sudo apt-get install -y python3.9 python3.9-venv python3-re2
           fi
-
-      - name: Install MongoDB (server) and start it (Ubuntu/Debian)
-        run: |
-          set -euo pipefail
-          if ! command -v mongod >/dev/null 2>&1; then
-            # dépôt communautaire Ubuntu 22.04+: mongodb-org (si indispo, fallback à mongodb-clients + mongod du système)
-            if ! grep -q "repo.mongodb.org" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
-              curl -fsSL https://pgp.mongodb.com/server-6.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-6.0.gpg
-              echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-6.0.gpg ] https://repo.mongodb.org/apt/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME)/mongodb-org/6.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
-              sudo apt-get update -y
-            fi
-            sudo apt-get install -y mongodb-org
-          fi
-          # (ré)demarrer mongod
-          sudo systemctl enable --now mongod || sudo service mongod start || true
-
-      - name: Wait for MongoDB TCP
-        run: |
-          set -euo pipefail
-          for i in {1..120}; do
-            if (echo >/dev/tcp/127.0.0.1/27017) 2>/dev/null; then
-              echo "✅ MongoDB up"; exit 0
-            fi
-            echo "⏳ Waiting MongoDB 127.0.0.1:27017..."
-            sleep 1
-          done
-          echo "❌ MongoDB did not start"; exit 1
-
-      - name: Set up Python 3.9
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-
-      - name: Create virtualenv (avoid PEP 668) & upgrade pip
-        run: |
-          set -euo pipefail
-          python -m venv .venv
-          . .venv/bin/activate
-          python -V
-          pip -V
+          # venv 3.9 (garde les paquets système pour voir python3-re2)
+          python3.9 -m venv "$GITHUB_WORKSPACE/.venv" --system-site-packages
+          . "$GITHUB_WORKSPACE/.venv/bin/activate"
+          python --version
           pip install --upgrade pip setuptools wheel
 
-      - name: Install Bazelisk (for google-re2 build)
+      - name: Start Docker daemon (if needed) & hard prune containers/images
         run: |
           set -euo pipefail
-          if ! command -v bazel >/dev/null 2>&1; then
-            sudo curl -L "https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64" -o /usr/local/bin/bazel
-            sudo chmod +x /usr/local/bin/bazel
+          # S'assurer que le daemon tourne
+          sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || true
+          # Purge totale avant (containers/volumes/images qui bloquent)
+          sudo docker ps -aq | xargs -r sudo docker rm -fv || true
+          sudo docker system prune -af --volumes || true
+          sudo docker info >/dev/null 2>&1 || (echo "❌ Docker daemon not running"; exit 1)
+          echo "✅ Docker ready"
+
+      - name: Pull & run Mongo 6.0 (clean)
+        run: |
+          set -euo pipefail
+          # Stop si existe (sécurité)
+          sudo docker rm -f gha-mongo >/dev/null 2>&1 || true
+          # Run fresh
+          sudo docker run -d --name gha-mongo --rm -p 27017:27017 mongo:6.0
+          # Wait TCP
+          for i in {1..120}; do
+            if (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1; then
+              echo "✅ MongoDB up"; break
+            fi
+            echo "⏳ Waiting MongoDB 127.0.0.1:27017..."; sleep 1
+            if [ "$i" -eq 120 ]; then echo "❌ MongoDB did not start"; exit 1; fi
+          done
+
+      - name: Ensure mongorestore (MongoDB Database Tools)
+        run: |
+          set -euo pipefail
+          if ! command -v mongorestore >/dev/null 2>&1; then
+            TOOLS_VER="100.9.4"
+            wget -q https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}.tgz
+            tar -xzf mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}.tgz
+            sudo mv mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}/bin/* /usr/local/bin/
+            rm -rf mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}*
           fi
-          bazel --version || true
+          mongorestore --version
 
       - name: Clone Sefaria-Project
         run: |
@@ -124,39 +118,48 @@ jobs:
           git clone --depth 1 https://github.com/Sefaria/Sefaria-Project.git
           ls -la Sefaria-Project
 
-      - name: Prepare constraints & install deps (google-re2 build path)
+      - name: Patch requirements (drop google-re2, use psycopg2-binary)
         working-directory: Sefaria-Project
         run: |
           set -euo pipefail
-          . "${GITHUB_WORKSPACE}/.venv/bin/activate"
-          echo "google-re2==1.0" > constraints-ci.txt
-          # accélère les builds cython
-          pip install --upgrade "cython<3.0.0" || true
-          pip install -r requirements.txt -c constraints-ci.txt
+          # fabriquer une requirements sans google-re2
+          grep -viE '^\s*(google-re2)\b' requirements.txt > req-no-re2.txt || true
+          # remplacer psycopg2 par binaire
+          sed -E -i 's/^\s*psycopg2(\b.*)?$/psycopg2-binary==2.9.9/' req-no-re2.txt
+          echo "---- effective reqs ----"
+          cat req-no-re2.txt
 
-      - name: Create local_settings.py (SEFARIA_DB, EXPORT_PATH)
+      - name: Install Python deps into venv
+        working-directory: Sefaria-Project
+        run: |
+          set -euo pipefail
+          . "$GITHUB_WORKSPACE/.venv/bin/activate"
+          python -V && pip -V
+          pip install --no-cache-dir -r req-no-re2.txt
+          # Sanity: le binding re2 doit exister via paquet système visible dans le venv
+          python - <<'PY'
+          import re2, sys
+          print("✅ re2 OK:", re2.__file__)
+          PY
+
+      - name: Configure sefaria/local_settings.py
         working-directory: Sefaria-Project/sefaria
         run: |
           set -euo pipefail
-          . "${GITHUB_WORKSPACE}/.venv/bin/activate"
           mkdir -p "$SEFARIA_EXPORT_PATH"
           cp local_settings_example.py local_settings.py
           python - <<'PY'
           import os, re
-          p = "local_settings.py"
-          with open(p, "r", encoding="utf-8") as f:
-              s = f.read()
-          s = re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"', s)
-          s = re.sub(r"MONGO_HOST\s*=.*", f'MONGO_HOST = "{os.environ["MONGO_HOST"]}"', s)
-          s = re.sub(r"MONGO_PORT\s*=.*", f'MONGO_PORT = {int(os.environ["MONGO_PORT"])}', s)
-          s = re.sub(r"MONGO_DB_NAME\s*=.*", f'MONGO_DB_NAME = "{os.environ["MONGO_DB_NAME"]}"', s)
-          if re.search(r"SEFARIA_DB\s*=", s):
-              s = re.sub(r"SEFARIA_DB\s*=.*", 'SEFARIA_DB = "sefaria"', s)
-          else:
-              s += '\nSEFARIA_DB = "sefaria"\n'
-          with open(p, "w", encoding="utf-8") as f:
-              f.write(s)
-          print("✅ local_settings.py configured (SEFARIA_DB=sefaria)")
+          p="local_settings.py"
+          with open(p,"r",encoding="utf-8") as f: s=f.read()
+          s=re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"', s)
+          s=re.sub(r"MONGO_HOST\s*=.*", f'MONGO_HOST = "{os.environ["MONGO_HOST"]}"', s)
+          s=re.sub(r"MONGO_PORT\s*=.*", f'MONGO_PORT = {int(os.environ["MONGO_PORT"])}', s)
+          s=re.sub(r"MONGO_DB_NAME\s*=.*", f'MONGO_DB_NAME = "{os.environ["MONGO_DB_NAME"]}"', s)
+          if re.search(r"SEFARIA_DB\s*=", s): s=re.sub(r"SEFARIA_DB\s*=.*", 'SEFARIA_DB = "sefaria"', s)
+          else: s+='\nSEFARIA_DB = "sefaria"\n'
+          with open(p,"w",encoding="utf-8") as f: f.write(s)
+          print("✅ local_settings.py configured")
           PY
 
       - name: Download small Mongo dump
@@ -166,11 +169,11 @@ jobs:
           if command -v aria2c >/dev/null 2>&1; then
             aria2c -x 16 -s 16 -k 1M -o dump_small.tar.gz "https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz"
           else
-            curl -L -o dump_small.tar.gz "https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz"
+            wget -O dump_small.tar.gz "https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz"
           fi
           tar -xzf dump_small.tar.gz -C mongo_dump
           rm -f dump_small.tar.gz
-          echo "Dump tree:"; find mongo_dump -maxdepth 3 | sed -e 's/^/  /'
+          echo "Dump tree:"; find mongo_dump -maxdepth 3 -type d -or -type f | sed 's/^/  /'
 
       - name: Normalize layout to mongo_dump_pkg/sefaria
         run: |
@@ -181,72 +184,66 @@ jobs:
           elif [ -d mongo_dump/sefaria ]; then
             cp -a mongo_dump/sefaria mongo_dump_pkg/
           else
-            echo "❌ Could not find 'sefaria' folder in dump"; exit 1
+            echo "❌ 'sefaria' folder not found in dump"; exit 1
           fi
-          find mongo_dump_pkg -maxdepth 2 | sed -e 's/^/  /'
+          find mongo_dump_pkg -maxdepth 2 | sed 's/^/  /'
 
-      - name: Restore DB
+      - name: Restore DB and run export_all_merged
+        env:
+          PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
         run: |
           set -euo pipefail
-          mongorestore --host 127.0.0.1 --port 27017 --drop --db sefaria "mongo_dump_pkg/sefaria"
-          # créer la collection 'history' si absente
-          . "${GITHUB_WORKSPACE}/.venv/bin/activate"
+          . "$GITHUB_WORKSPACE/.venv/bin/activate"
+
+          # Restore
+          mongorestore --host 127.0.0.1 --port 27017 --drop --db sefaria "mongo_dump_pkg/sefaria" || { echo "❌ mongorestore failed"; exit 1; }
+
           python - <<'PY'
           from pymongo import MongoClient, errors
           client = MongoClient("mongodb://127.0.0.1:27017")
           db = client["sefaria"]
           try:
               db.create_collection("history")
-              print("Created empty 'history' collection.")
+              print("Created 'history' collection.")
           except errors.CollectionInvalid:
               print("'history' already exists.")
           PY
 
-      - name: Run export_all_merged
-        env:
-          PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
-        run: |
-          set -euo pipefail
-          . "${GITHUB_WORKSPACE}/.venv/bin/activate"
-          BASE="$SEFARIA_EXPORT_BASE"
-          mkdir -p "$BASE"
-          FINAL_DIR="$RUNNER_TEMP/final_root"
-          mkdir -p "$FINAL_DIR"
-          # redirect export path to staging/export_all_merged
+          # Pointer export dir
+          export CUR_EXPORT="export_all_merged"
+          DEST_DIR="$SEFARIA_EXPORT_BASE/$CUR_EXPORT"
+          mkdir -p "$DEST_DIR"
           python - <<'PY'
           import os, re
           p = os.path.join("Sefaria-Project","sefaria","local_settings.py")
-          with open(p, "r", encoding="utf-8") as f:
-              s = f.read()
-          dest = os.path.join(os.environ["GITHUB_WORKSPACE"], "staging", "export_all_merged")
+          with open(p,"r",encoding="utf-8") as f: s=f.read()
+          dest = os.path.join(os.environ["GITHUB_WORKSPACE"],"staging","export_all_merged")
           s = re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{dest}"', s)
-          with open(p, "w", encoding="utf-8") as f:
-              f.write(s)
-          print("➡️  SEFARIA_EXPORT_PATH set to:", dest)
+          with open(p,"w",encoding="utf-8") as f: f.write(s)
+          print("➡️  SEFARIA_EXPORT_PATH ->", dest)
           PY
-          # run export_all_merged
+
+          # Run export
           python - <<'PY'
           import os, sys, django
           sys.path.insert(0, os.path.abspath("Sefaria-Project"))
-          os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
+          os.environ.setdefault("DJANGO_SETTINGS_MODULE","sefaria.settings")
           django.setup()
           from sefaria import export as ex
           ex.export_all_merged()
-          print("✅ export_all_merged completed.")
+          print("✅ export_all_merged finished.")
           PY
-          # move to FINAL_DIR
-          rsync -a "${SEFARIA_EXPORT_BASE}/export_all_merged/" "$FINAL_DIR/" || cp -a "${SEFARIA_EXPORT_BASE}/export_all_merged/." "$FINAL_DIR/"
 
-      - name: Drop DB and cleanup
-        if: always()
-        run: |
-          set +e
-          mongosh --quiet --eval 'db.getSiblingDB("sefaria").dropDatabase()' || true
-          sudo systemctl stop mongod || true
-          rm -rf mongo_dump mongo_dump_pkg || true
-          rm -rf "${GITHUB_WORKSPACE}/Sefaria-Project" || true
-          rm -rf ~/.cache/pip || true
-          df -h || true
+          # Collect artifacts
+          FINAL_DIR="$RUNNER_TEMP/final_root"
+          mkdir -p "$FINAL_DIR"
+          rsync -a "$DEST_DIR/" "$FINAL_DIR/" || cp -a "$DEST_DIR/." "$FINAL_DIR/"
+          echo "Files gathered into $FINAL_DIR:"
+          find "$FINAL_DIR" -maxdepth 2 -type f | head -n 50
+          COUNT=$(find "$FINAL_DIR" -type f | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "❌ No files produced by export_all_merged"; exit 1
+          fi
 
       - name: Push exported content to date-named branch (root + keep .github)
         env:
@@ -261,20 +258,31 @@ jobs:
           git -C "$REPO_DIR" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
           TS_BRANCH="${TS_STAMP}"
           git -C "$REPO_DIR" checkout --orphan "$TS_BRANCH"
-          # keep workflows
+
+          # Keep CI
           mkdir -p "$REPO_DIR/.github"
           cp -a "$GITHUB_WORKSPACE/.github/." "$REPO_DIR/.github/"
-          # copy export to repo root
+
+          # Copy export root
           FINAL_DIR="$RUNNER_TEMP/final_root"
-          if [ -d "$FINAL_DIR" ]; then
-            cp -a "$FINAL_DIR/." "$REPO_DIR/"
-          fi
+          cp -a "$FINAL_DIR/." "$REPO_DIR/"
+
           cd "$REPO_DIR"
+          echo "Snapshot of repo before commit:"; find . -maxdepth 2 -type f | sed 's/^/  /' | head -n 100
           git add -A
           if git diff --cached --quiet; then
-            echo "ℹ️ No changes to push; skipping commit."
+            echo "ℹ️ No changes to commit."
           else
             git commit -m "chore(export): export_all_merged at ${TS_STAMP} [skip ci]"
             git push --force origin HEAD:"$TS_BRANCH"
             echo "✅ Pushed to branch ${TS_BRANCH}"
           fi
+
+      - name: Docker hard cleanup (containers/images/volumes)
+        if: always()
+        run: |
+          set +e
+          sudo docker ps -aq | xargs -r sudo docker rm -fv
+          sudo docker system prune -af --volumes
+          sudo docker images -q | xargs -r sudo docker rmi -f
+          true
