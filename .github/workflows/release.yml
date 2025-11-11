@@ -1,4 +1,4 @@
-name: Sefaria Export (Self-hosted, venv, Docker Mongo)
+name: Sefaria Export (Self-hosted, Python 3.9 Forced, Docker Mongo)
 
 on:
   workflow_dispatch:
@@ -16,6 +16,7 @@ env:
   MONGO_HOST: 127.0.0.1
   MONGO_PORT: 27017
   MONGO_DB_NAME: sefaria
+  PYTHONDONTWRITEBYTECODE: 1
 
 jobs:
 
@@ -49,25 +50,29 @@ jobs:
           sparse-checkout-cone-mode: false
 
       # --------------------------------------------------------
-      # Install system dependencies
+      # Install Python 3.9 and system deps
       # --------------------------------------------------------
-      - name: Install apt deps
+      - name: Install Python 3.9 + system deps
         run: |
           sudo apt-get update -y
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository ppa:deadsnakes/ppa -y
+
+          sudo apt-get update -y
           sudo apt-get install -y \
-            python3 python3-pip python3-venv python3-dev \
+            python3.9 python3.9-dev python3.9-venv \
             build-essential libre2-dev pybind11-dev \
             cmake ninja-build libpq-dev pkg-config \
             aria2 rsync wget curl git ca-certificates
 
       # --------------------------------------------------------
-      # Create venv (PEP 668 FIX)
+      # Create venv in Python 3.9
       # --------------------------------------------------------
-      - name: Create Python venv
+      - name: Create Python 3.9 venv
         run: |
-          python3 -m venv "$RUNNER_TEMP/venv"
+          python3.9 -m venv "$RUNNER_TEMP/venv"
           source "$RUNNER_TEMP/venv/bin/activate"
-          python3 -m pip install --upgrade pip setuptools wheel
+          python3.9 -m pip install --upgrade pip setuptools wheel
 
       # --------------------------------------------------------
       # Install MongoDB Tools
@@ -81,16 +86,16 @@ jobs:
           rm -rf mongodb-database-tools*
 
       # --------------------------------------------------------
-      # Clone Sefaria
+      # Clone Sefaria project
       # --------------------------------------------------------
       - name: Clone Sefaria repo
         run: |
           git clone --depth=1 https://github.com/Sefaria/Sefaria-Project.git
 
       # --------------------------------------------------------
-      # Install Python dependencies into venv
+      # Install Python deps into venv (Python 3.9)
       # --------------------------------------------------------
-      - name: Install Python deps (venv)
+      - name: Install Python deps
         working-directory: Sefaria-Project
         run: |
           source "$RUNNER_TEMP/venv/bin/activate"
@@ -135,6 +140,9 @@ jobs:
             cp -a mongo_dump/sefaria mongo_dump_pkg/
           fi
 
+      # --------------------------------------------------------
+      # Restore DB
+      # --------------------------------------------------------
       - name: Restore DB
         run: |
           mongorestore --drop --db sefaria mongo_dump_pkg/sefaria
@@ -142,7 +150,7 @@ jobs:
       - name: Ensure history collection
         run: |
           source "$RUNNER_TEMP/venv/bin/activate"
-          python3 - <<'PY'
+          python3.9 - <<'PY'
           from pymongo import MongoClient
           c = MongoClient("mongodb://127.0.0.1:27017")
           try: c["sefaria"].create_collection("history")
@@ -151,13 +159,13 @@ jobs:
           PY
 
       # --------------------------------------------------------
-      # Configure settings
+      # Configure local_settings.py
       # --------------------------------------------------------
       - name: Configure local_settings.py
         working-directory: Sefaria-Project/sefaria
         run: |
           cp local_settings_example.py local_settings.py
-          python3 - <<'PY'
+          python3.9 - <<'PY'
           import os, re
           p="local_settings.py"
           s=open(p).read()
@@ -170,7 +178,7 @@ jobs:
           PY
 
       # --------------------------------------------------------
-      # Run export_all_merged (inside venv)
+      # Run export_all_merged (Python 3.9 venv)
       # --------------------------------------------------------
       - name: Run export_all_merged
         env:
@@ -178,7 +186,7 @@ jobs:
         run: |
           source "$RUNNER_TEMP/venv/bin/activate"
           mkdir -p "$SEFARIA_EXPORT_PATH/export_all_merged"
-          python3 - <<'PY'
+          python3.9 - <<'PY'
           import os,sys,django
           sys.path.insert(0, os.path.abspath("Sefaria-Project"))
           os.environ.setdefault("DJANGO_SETTINGS_MODULE","sefaria.settings")
