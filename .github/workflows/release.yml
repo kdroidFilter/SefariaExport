@@ -111,19 +111,22 @@ jobs:
           pip install -r req-no-re2.txt
           pip install built-google-re2
 
+      - name: Create exports directory
+        run: |
+          mkdir -p "${{ github.workspace }}/exports"
+          echo "SEFARIA_EXPORT_BASE=${{ github.workspace }}/exports" >> "$GITHUB_ENV"
+
       - name: Create local_settings.py (SEFARIA_DB, export path)
         working-directory: Sefaria-Project/sefaria
-        env:
-          SEFARIA_EXPORT_BASE: ${{ github.workspace }}/exports
         run: |
-          mkdir -p "$SEFARIA_EXPORT_BASE"
           cp local_settings_example.py local_settings.py
           python - <<'PY'
           import os, re
           p = "local_settings.py"
           with open(p, "r", encoding="utf-8") as f:
               s = f.read()
-          s = re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_BASE"]}"', s)
+          export_base = os.environ.get("SEFARIA_EXPORT_BASE", "")
+          s = re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{export_base}"', s)
           s = re.sub(r"MONGO_HOST\s*=.*", f'MONGO_HOST = "{os.environ.get("MONGO_HOST","127.0.0.1")}"', s)
           s = re.sub(r"MONGO_PORT\s*=.*", f'MONGO_PORT = {int(os.environ.get("MONGO_PORT","27017"))}', s)
           s = re.sub(r"MONGO_DB_NAME\s*=.*", f'MONGO_DB_NAME = "{os.environ.get("MONGO_DB_NAME","sefaria")}"', s)
@@ -134,6 +137,7 @@ jobs:
           with open(p, "w", encoding="utf-8") as f:
               f.write(s)
           print("✅ local_settings.py configured")
+          print(f"   SEFARIA_EXPORT_PATH = {export_base}")
           PY
 
       - name: Wait for MongoDB TCP
@@ -163,20 +167,24 @@ jobs:
           PY
           echo "✅ Mongo restore complete."
 
-      - name: Run export function
+      - name: Run export functions
         working-directory: Sefaria-Project
-        env:
-          PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
-          SEFARIA_EXPORT_BASE: ${{ github.workspace }}/exports
         run: |
+          export PYTHONPATH="${{ github.workspace }}/Sefaria-Project"
+          export SEFARIA_EXPORT_PATH="${{ github.workspace }}/exports"
+          
           python - <<'PY'
           import os, sys, django
+          
           sys.path.insert(0, os.path.abspath("."))
           os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
           
-          # Correction: utiliser une valeur par défaut si SEFARIA_EXPORT_BASE n'existe pas
-          export_base = os.environ.get("SEFARIA_EXPORT_BASE", os.path.join(os.getcwd(), "exports"))
-          os.environ["SEFARIA_EXPORT_PATH"] = export_base
+          # S'assurer que SEFARIA_EXPORT_PATH est défini
+          export_base = os.environ.get("SEFARIA_EXPORT_PATH")
+          if not export_base:
+              raise RuntimeError("SEFARIA_EXPORT_PATH is not set")
+          
+          print(f"📁 Export base directory: {export_base}")
           
           django.setup()
           
@@ -190,12 +198,23 @@ jobs:
           ]
           
           for fn_name, fn_callable in functions_to_run:
-              print(f"▶️  Running {fn_name}...")
-              fn_callable()
-              print(f"✅ {fn_name} done.")
+              print(f"\n▶️  Running {fn_name}...")
+              try:
+                  fn_callable()
+                  print(f"✅ {fn_name} completed")
+              except Exception as e:
+                  print(f"❌ {fn_name} failed: {e}")
+                  raise
           
-          print("✅ All exports completed.")
+          print("\n✅ All exports completed successfully")
           PY
+
+      - name: Verify exports were created
+        run: |
+          echo "📁 Checking export directory contents:"
+          ls -lah "${{ github.workspace }}/exports" || echo "❌ exports directory not found"
+          find "${{ github.workspace }}/exports" -type d -maxdepth 2 || true
+          find "${{ github.workspace }}/exports" -type f | head -20 || true
 
       - name: Drop DB (free space)
         run: |
@@ -207,15 +226,33 @@ jobs:
           TS_STAMP: ${{ steps.ts.outputs.stamp }}
         run: |
           set -euo pipefail
-          cd "${GITHUB_WORKSPACE}"
+          cd "${{ github.workspace }}"
           COMBINED="sefaria-exports-${TS_STAMP}.tar.zst"
-          # Aplatir: mettre le contenu de chaque export directement à la racine
-          tar -cf - \
-            -C exports/export_all_merged . \
-            -C exports/export_links . \
-            -C exports/export_schemas . \
-            -C exports/export_toc . \
-          | zstd --ultra -22 -T0 -o "${COMBINED}"
+          
+          # Vérifier quels répertoires d'export existent
+          EXPORT_DIRS=()
+          for dir in export_all_merged export_links export_schemas export_toc; do
+            if [ -d "exports/${dir}" ] && [ -n "$(ls -A exports/${dir} 2>/dev/null)" ]; then
+              EXPORT_DIRS+=("${dir}")
+              echo "✅ Found: exports/${dir}"
+            else
+              echo "⚠️  Missing or empty: exports/${dir}"
+            fi
+          done
+          
+          if [ "${#EXPORT_DIRS[@]}" -eq 0 ]; then
+            echo "❌ No export directories found!"
+            exit 1
+          fi
+          
+          # Créer le tar avec seulement les répertoires qui existent
+          TAR_CMD="tar -cf -"
+          for dir in "${EXPORT_DIRS[@]}"; do
+            TAR_CMD+=" -C exports/${dir} ."
+          done
+          
+          echo "📦 Creating archive with: ${EXPORT_DIRS[*]}"
+          eval "${TAR_CMD}" | zstd --ultra -22 -T0 -o "${COMBINED}"
           ls -lh "${COMBINED}"
 
       - name: Split archive into <2GB parts
@@ -224,15 +261,23 @@ jobs:
         run: |
           set -euo pipefail
           COMBINED="sefaria-exports-${TS_STAMP}.tar.zst"
-          # Découpe en ~1.9GB pour rester sous 2GB par asset
-          split -b 1900m -d -a 2 "${COMBINED}" "${COMBINED}.part-"
-          PARTS=( ${COMBINED}.part-* )
-          if [ "${#PARTS[@]}" -eq 1 ]; then
-            # Un seul morceau -> on le renomme en fichier final
-            mv "${PARTS[0]}" "${COMBINED}"
-            echo "SINGLE_PART=${COMBINED}" >> "$GITHUB_ENV"
+          
+          if [ ! -f "${COMBINED}" ]; then
+            echo "❌ Archive not found: ${COMBINED}"
+            exit 1
+          fi
+          
+          FILE_SIZE=$(stat -c%s "${COMBINED}")
+          echo "📊 Archive size: ${FILE_SIZE} bytes ($(numfmt --to=iec-i --suffix=B ${FILE_SIZE}))"
+          
+          # Si < 1.9GB, pas besoin de split
+          if [ "${FILE_SIZE}" -lt 1900000000 ]; then
+            echo "✅ File is small enough, no splitting needed"
           else
-            printf "%s\n" "${PARTS[@]}"
+            echo "✂️  Splitting into parts..."
+            split -b 1900m -d -a 2 "${COMBINED}" "${COMBINED}.part-"
+            rm "${COMBINED}"  # Supprimer l'original après split
+            ls -lh "${COMBINED}".part-*
           fi
 
       - name: Ensure gh cli
@@ -249,8 +294,8 @@ jobs:
           TS_STAMP: ${{ steps.ts.outputs.stamp }}
         run: |
           TAG="${TS_STAMP}"
-          TITLE="${TS_STAMP}"
-          NOTES=$'Combined Sefaria exports (zstd --ultra -22 -T0).\n\nContents are flattened at archive root from:\n- export_all_merged\n- export_links\n- export_schemas\n- export_toc\n\nRestore:\n  # si parts\n  cat sefaria-exports-'"${TS_STAMP}"'.tar.zst.part-* > combined.tar.zst && tar --zstd -xf combined.tar.zst\n  # si unique\n  tar --zstd -xf sefaria-exports-'"${TS_STAMP}"'.tar.zst'
+          TITLE="Sefaria Export ${TS_STAMP}"
+          NOTES=$'Combined Sefaria exports (zstd --ultra -22 -T0).\n\nContents are flattened at archive root from:\n- export_all_merged\n- export_links\n- export_schemas\n- export_toc\n\nRestore:\n  # if split into parts\n  cat sefaria-exports-'"${TS_STAMP}"'.tar.zst.part-* > combined.tar.zst && tar --zstd -xf combined.tar.zst\n  # if single file\n  tar --zstd -xf sefaria-exports-'"${TS_STAMP}"'.tar.zst'
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" -t "$TITLE" -n "$NOTES"
 
       - name: Upload parts (or single file)
@@ -261,20 +306,34 @@ jobs:
           set -euo pipefail
           TAG="${TS_STAMP}"
           shopt -s nullglob
+          
+          # Chercher les fichiers à uploader
           FILES=( sefaria-exports-"${TS_STAMP}".tar.zst.part-* )
           if [ "${#FILES[@]}" -eq 0 ]; then
             FILES=( sefaria-exports-"${TS_STAMP}".tar.zst )
           fi
+          
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "❌ No files to upload!"
+            exit 1
+          fi
+          
+          echo "📤 Found ${#FILES[@]} file(s) to upload"
+          
           for f in "${FILES[@]}"; do
-            echo "Uploading $f"
+            echo "Uploading: $f ($(stat -c%s "$f" | numfmt --to=iec-i --suffix=B))"
             for attempt in {1..5}; do
               if gh release upload "$TAG" "$f" --clobber; then
-                echo "✅ Uploaded: $f"; break
+                echo "✅ Uploaded: $f"
+                break
               fi
               sleep $((2**attempt))
-              echo "Retry $attempt for $f..."
+              echo "🔄 Retry $attempt for $f..."
               if [[ $attempt -eq 5 ]]; then
-                echo "❌ Failed to upload $f"; exit 1
+                echo "❌ Failed to upload $f after 5 attempts"
+                exit 1
               fi
             done
           done
+          
+          echo "✅ All files uploaded successfully"
