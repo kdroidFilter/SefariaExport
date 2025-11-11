@@ -141,6 +141,92 @@ jobs:
           echo "---- effective requirements (without google-re2) ----"
           head -n 80 req-no-re2.txt
 
+      - name: Add re2 shim (compat Options + compile(options=...))
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > Sefaria-Project/re2.py <<'PY'
+          """
+          Lightweight compatibility shim for 'google-re2' used by Sefaria.
+          Provides:
+            - Options(): common attributes used by callers
+            - compile(pattern, options=None): maps basic fields to Python 're'
+          Falls back to stdlib 're' for everything else.
+          """
+          import re as _re
+
+          class Options:
+              __slots__ = (
+                  "case_sensitive",
+                  "posix_syntax",
+                  "longest_match",
+                  "log_errors",
+                  "max_mem",
+                  "literal",
+                  "word_boundary",
+                  "one_line",
+                  "dot_nl",
+              )
+              def __init__(self):
+                  self.case_sensitive = True
+                  self.posix_syntax   = False
+                  self.longest_match  = False
+                  self.log_errors     = False
+                  self.max_mem        = None
+                  self.literal        = False
+                  self.word_boundary  = False
+                  self.one_line       = False
+                  self.dot_nl         = False
+              def __repr__(self):
+                  return (f"Options(case_sensitive={self.case_sensitive}, "
+                          f"posix_syntax={self.posix_syntax}, longest_match={self.longest_match}, "
+                          f"dot_nl={self.dot_nl}, one_line={self.one_line})")
+
+          def compile(pattern, options=None):
+              flags = 0
+              if options is not None:
+                  if getattr(options, "case_sensitive", True) is False:
+                      flags |= _re.IGNORECASE
+                  if getattr(options, "dot_nl", False):
+                      flags |= _re.DOTALL
+                  if getattr(options, "one_line", False):
+                      flags |= _re.MULTILINE
+                  if getattr(options, "literal", False):
+                      pattern = _re.escape(pattern)
+              return _re.compile(pattern, flags)
+
+          # Common passthroughs
+          error     = _re.error
+          escape    = _re.escape
+          match     = _re.match
+          search    = _re.search
+          fullmatch = getattr(_re, "fullmatch", None)
+          findall   = _re.findall
+          finditer  = _re.finditer
+          sub       = _re.sub
+          subn      = _re.subn
+          split     = _re.split
+          Pattern   = getattr(_re, "Pattern", None)
+
+          IGNORECASE = _re.IGNORECASE
+          MULTILINE  = _re.MULTILINE
+          DOTALL     = _re.DOTALL
+          VERBOSE    = _re.VERBOSE
+          ASCII      = getattr(_re, "ASCII", 0)
+          UNICODE    = getattr(_re, "UNICODE", 0)
+          PY
+          echo "PYTHONPATH=${GITHUB_WORKSPACE}/Sefaria-Project${PYTHONPATH:+:${PYTHONPATH}}" >> "$GITHUB_ENV"
+
+          # Smoke-test rapide
+          python - <<'PY'
+          import re2
+          opt = re2.Options()
+          opt.case_sensitive = False
+          rx = re2.compile(r"ABC", opt)
+          assert rx.search("abc")
+          print("✅ re2 shim OK")
+          PY
+
       - name: Install Python deps into venv
         shell: bash
         run: |
@@ -149,16 +235,6 @@ jobs:
           python -m pip install -U pip setuptools wheel
           python -m pip install -U Cython
           python -m pip install --no-cache-dir -r Sefaria-Project/req-no-re2.txt
-
-      - name: Add re2 shim (fallback → stdlib re)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > Sefaria-Project/re2.py <<'PY'
-          # Minimal shim to satisfy "import re2 as re"
-          from re import *
-          PY
-          echo "PYTHONPATH=${GITHUB_WORKSPACE}/Sefaria-Project${PYTHONPATH:+:${PYTHONPATH}}" >> "$GITHUB_ENV"
 
       - name: Configure local_settings.py (SEFARIA_DB + export path)
         shell: bash
@@ -314,7 +390,7 @@ jobs:
       - name: Push merged exports to date-named branch (root + keep .github) — batched & resilient
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BATCH_SIZE: "4000" 
+          BATCH_SIZE: "4000"   # Ajuste la taille des lots si besoin
         shell: bash
         run: |
           set -euo pipefail
@@ -357,13 +433,11 @@ jobs:
               fi
               code=$?
               echo "❌ Push failed with code $code"
-              # branche distante déjà à la bonne révision ?
               rem_head="$(git -C "$REPO_DIR" ls-remote --heads origin "$TS_BRANCH" | awk '{print $1}')"
               if [ -n "$rem_head" ] && [ "$rem_head" = "$loc_head" ]; then
                 echo "ℹ️ Remote already has our commit ($rem_head). Treat as success."
                 return 0
               fi
-              # resserrer pack et retenter
               git -C "$REPO_DIR" config pack.packSizeLimit 64m
               git -C "$REPO_DIR" repack -adfl --write-bitmap-index || true
               sleep "$delay"
@@ -378,7 +452,7 @@ jobs:
           i=0
           declare -a buf=()
 
-          # lister uniquement les fichiers non suivis (tout est untracked sur une branche orpheline)
+          # lister uniquement les fichiers non suivis (branche orpheline)
           while IFS= read -r -d '' f; do
             buf+=("$f")
             if (( ${#buf[@]} >= ${BATCH_SIZE} )); then
