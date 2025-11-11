@@ -163,36 +163,36 @@ jobs:
           PY
           echo "✅ Mongo restore complete."
 
-      - name: Run exports (4 fonctions)
+      - name: Run export function
         working-directory: Sefaria-Project
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
-          SEFARIA_EXPORT_BASE: ${{ github.workspace }}/exports
         run: |
-          set -euo pipefail
-          run_export () {
-            local fn="$1"
-            echo "▶ $fn"
-            python - <<'PY'
-            import os, sys, django
-            sys.path.insert(0, os.path.abspath("."))
-            os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
-            os.environ.setdefault("SEFARIA_EXPORT_PATH", os.environ.get("SEFARIA_EXPORT_BASE"))
-            django.setup()
-            from sefaria import export as ex
-            allowed = {
+          FN="${FN}"
+          python - <<'PY'
+          import os, sys, django
+          sys.path.insert(0, os.path.abspath("."))
+          os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
+          os.environ.setdefault("SEFARIA_EXPORT_PATH", os.environ.get("SEFARIA_EXPORT_BASE"))
+          django.setup()
+          
+          from sefaria import export as ex
+          
+          fn = os.environ["FN"]
+          allowed = {
               "export_all_merged": ex.export_all_merged,
               "export_links": ex.export_links,
               "export_schemas": ex.export_schemas,
               "export_toc": ex.export_toc,
-            }
-            fn = os.environ["FN"]
-            if fn not in allowed:
-              raise SystemExit(f"Unknown export function: {fn}")
-            allowed[fn]()
-            print(f"✅ {fn} completed.")
-            PY
           }
+          
+          if fn not in allowed:
+              raise SystemExit(f"Unknown function: {fn}")
+          
+          allowed[fn]()
+          print(f"✅ {fn} done.")
+          PY
+
           export FN=export_all_merged; run_export "$FN"
           export FN=export_links;       run_export "$FN"
           export FN=export_schemas;     run_export "$FN"
