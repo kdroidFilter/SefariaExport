@@ -54,44 +54,68 @@ jobs:
             .github
           sparse-checkout-cone-mode: false
 
-      # ---------------------------
-      # Python setup
-      # ---------------------------
-      - name: Setup Python 3.9
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - name: Python version check
+      # ---------------------------------
+      # Install system dependencies
+      # ---------------------------------
+      - name: Install system packages
         run: |
-          python -V
-          pip -V
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential \
+            libre2-dev \
+            pybind11-dev \
+            cmake \
+            ninja-build \
+            libpq-dev \
+            pkg-config \
+            python3-dev \
+            aria2 \
+            rsync \
+            wget \
+            curl \
+            ca-certificates
 
-      # ---------------------------
-      # Fix psycopg2 (replace with binary version)
-      # ---------------------------
-      - name: Clone Sefaria repo
+      # ---------------------------------
+      # Install MongoDB Database Tools
+      # ---------------------------------
+      - name: Install MongoDB Tools
+        run: |
+          TOOLS="100.9.4"
+          wget -q https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-${TOOLS}.tgz
+          tar -xzf mongodb-database-tools-ubuntu2204-x86_64-${TOOLS}.tgz
+          sudo mv mongodb-database-tools-ubuntu2204-x86_64-${TOOLS}/bin/* /usr/local/bin/
+          rm -rf mongodb-database-tools*
+
+      # ---------------------------------
+      # Clone Sefaria
+      # ---------------------------------
+      - name: Clone Sefaria
         run: |
           git clone --depth 1 https://github.com/Sefaria/Sefaria-Project.git
 
-      - name: Replace psycopg2 → psycopg2-binary
+      # ---------------------------------
+      # Fix requirements: psycopg2 + google-re2 OK now
+      # ---------------------------------
+      - name: Fix requirements (psycopg2 OK)
         working-directory: Sefaria-Project
         run: |
-          sed -i 's/psycopg2/psycopg2-binary/g' requirements.txt || true
+          # Ensure psycopg2 is present and installable
+          sed -i 's/psycopg2-binary/psycopg2/g' requirements.txt || true
+          echo "✅ psycopg2 will build using libpq-dev"
 
-      # ---------------------------
-      # Install python dependencies
-      # ---------------------------
-      - name: Install Python deps
+      # ---------------------------------
+      # Install Python deps
+      # ---------------------------------
+      - name: Install Python dependencies
         working-directory: Sefaria-Project
         run: |
-          python -m pip install -U pip setuptools wheel
+          python -m pip install --upgrade pip setuptools wheel
           pip install --no-cache-dir -r requirements.txt
 
-      # ---------------------------
-      # MongoDB via Docker
-      # ---------------------------
-      - name: Start MongoDB in Docker
+      # ---------------------------------
+      # Start MongoDB via Docker
+      # ---------------------------------
+      - name: Start MongoDB
         run: |
           docker rm -f sefaria-mongo >/dev/null 2>&1 || true
           docker run -d --name sefaria-mongo -p 27017:27017 mongo:6.0
@@ -100,60 +124,55 @@ jobs:
         run: |
           for i in {1..60}; do
             if (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1; then
-              echo "✅ Mongo is up"
+              echo "✅ MongoDB ready"
               exit 0
             fi
-            echo "⏳ Waiting Mongo..."
+            echo "⏳ waiting…"
             sleep 2
           done
           exit 1
 
-      # ---------------------------
-      # Download Mongo dump
-      # ---------------------------
+      # ---------------------------------
+      # Download Mongo Dump
+      # ---------------------------------
       - name: Download dump_small
         run: |
           mkdir -p mongo_dump
-          wget -O dump_small.tar.gz "https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz"
+          wget -O dump_small.tar.gz https://storage.googleapis.com/sefaria-mongo-backup/dump_small.tar.gz
           tar -xzf dump_small.tar.gz -C mongo_dump
           rm dump_small.tar.gz
 
-      - name: Normalize dump layout
+      - name: Normalize dump
         run: |
           mkdir -p mongo_dump_pkg
           if [ -d mongo_dump/dump/sefaria ]; then
             cp -a mongo_dump/dump/sefaria mongo_dump_pkg/
-          elif [ -d mongo_dump/sefaria ]; then
-            cp -a mongo_dump/sefaria mongo_dump_pkg/
           else
-            echo "❌ 'sefaria' folder not found"
-            exit 1
+            cp -a mongo_dump/sefaria mongo_dump_pkg/
           fi
 
-      # ---------------------------
+      # ---------------------------------
       # Restore DB
-      # ---------------------------
-      - name: Restore Mongo DB
+      # ---------------------------------
+      - name: Restore DB
         run: |
-          mongorestore --host 127.0.0.1 --port 27017 --drop --db sefaria mongo_dump_pkg/sefaria
+          mongorestore --drop --db sefaria mongo_dump_pkg/sefaria
 
-      - name: Ensure 'history' collection
+      - name: Ensure history collection
         run: |
           python - <<'PY'
           from pymongo import MongoClient
           c = MongoClient("mongodb://127.0.0.1:27017")
           db = c["sefaria"]
-          try:
-              db.create_collection("history")
-          except:
-              pass
+          try: db.create_collection("history")
+          except: pass
           print("✅ history collection ok")
           PY
 
-      # ---------------------------
+      # ---------------------------------
       # Configure local_settings.py
-      # ---------------------------
-      - name: Configure local_settings.py
+      # ---------------------------------
+      - name: Update local_settings.py
         working-directory: Sefaria-Project/sefaria
         run: |
           cp local_settings_example.py local_settings.py
@@ -165,16 +184,13 @@ jobs:
           s=re.sub(r"MONGO_HOST\s*=.*",'MONGO_HOST = "127.0.0.1"',s)
           s=re.sub(r"MONGO_PORT\s*=.*",'MONGO_PORT = 27017',s)
           s=re.sub(r"MONGO_DB_NAME\s*=.*",'MONGO_DB_NAME = "sefaria"',s)
-          if "SEFARIA_DB" in s:
-              s=re.sub(r"SEFARIA_DB\s*=.*",'SEFARIA_DB = "sefaria"',s)
-          else:
-              s+='\nSEFARIA_DB = "sefaria"\n'
+          s=re.sub(r"SEFARIA_DB\s*=.*",'SEFARIA_DB = "sefaria"',s)
           open(p,"w").write(s)
           PY
 
-      # ---------------------------
+      # ---------------------------------
       # Run export_all_merged
-      # ---------------------------
+      # ---------------------------------
       - name: Run export_all_merged
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
@@ -190,15 +206,15 @@ jobs:
           print("✅ export_all_merged done")
           PY
 
-      # ---------------------------
-      # Push to date-named branch
-      # ---------------------------
-      - name: Push export branch
+      # ---------------------------------
+      # Push branch named with timestamp
+      # ---------------------------------
+      - name: Push branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BRANCH="${TS_STAMP}"
-          FINAL_DIR="$SEFARIA_EXPORT_PATH/export_all_merged"
+          OUT="$SEFARIA_EXPORT_PATH/export_all_merged"
 
           TMP="$RUNNER_TEMP/pushrepo"
           rm -rf "$TMP"
@@ -214,20 +230,18 @@ jobs:
           mkdir -p "$TMP/.github"
           cp -a "$GITHUB_WORKSPACE/.github/." "$TMP/.github/"
 
-          cp -a "$FINAL_DIR/." "$TMP/"
+          cp -a "$OUT/." "$TMP/"
 
           git -C "$TMP" add -A
-          git -C "$TMP" commit -m "export_all_merged at ${TS_STAMP}"
+          git -C "$TMP" commit -m "Export at ${TS_STAMP}"
           git -C "$TMP" push --force origin HEAD:"$BRANCH"
 
-          echo "✅ Branch pushed: $BRANCH"
-
-      # ---------------------------
+      # ---------------------------------
       # Cleanup
-      # ---------------------------
+      # ---------------------------------
       - name: Cleanup
         if: always()
         run: |
           docker rm -f sefaria-mongo >/dev/null 2>&1 || true
           rm -rf mongo_dump mongo_dump_pkg Sefaria-Project staging || true
-          echo "✅ Cleanup done"
+          echo "✅ cleanup done"
