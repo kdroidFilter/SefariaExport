@@ -39,8 +39,16 @@ jobs:
     steps:
       - name: Manually clean workspace (self-hosted safety)
         run: |
-          rm -rf *
-
+          echo "Cleaning workspace at: ${GITHUB_WORKSPACE}"
+          if [ -z "${GITHUB_WORKSPACE}" ]; then
+            echo "GITHUB_WORKSPACE is empty, aborting to avoid deleting root." >&2
+            exit 1
+          fi
+          # Remove all files, including hidden ones, but keep the workspace directory itself
+          rm -rf "${GITHUB_WORKSPACE:?}/"* "${GITHUB_WORKSPACE:?}/".[!.]* "${GITHUB_WORKSPACE:?}/"..?* || true
+          mkdir -p "${GITHUB_WORKSPACE}"
+          echo "Workspace cleaned. Contents now:"
+          ls -la "${GITHUB_WORKSPACE}"
       - name: Checkout
         uses: actions/checkout@v4
         with:
