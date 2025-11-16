@@ -21,6 +21,7 @@ env:
 jobs:
   export_release:
     runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 4320
     defaults:
       run:
         working-directory: ${{ github.workspace }}
