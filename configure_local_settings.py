@@ -35,7 +35,7 @@ def main() -> None:
         f.write(s)
 
     print("✅ local_settings.py configured")
-    print(f"   SEFARIA_EXPORT_PATH = {export_base}")
+    print(f"   SEFARIA_EXPORT_PATH = {export_path}")
 
 
 if __name__ == "__main__":
