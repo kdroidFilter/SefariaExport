@@ -12,6 +12,35 @@ This repository is a collection of small, composable Bash and Python scripts tha
 - Optionally create a GitHub Release and upload the generated assets
 
 
+## 🚀 Quick Start with Docker (Recommended)
+
+The easiest way to run this pipeline is using Docker. No need to install MongoDB, Python, or other dependencies manually!
+
+### Prerequisites
+- Docker Desktop installed and running
+- At least 20GB free disk space
+
+### Run on Windows
+```cmd
+check_requirements.bat
+run_local.bat
+```
+
+### Run on Linux/Mac
+```bash
+chmod +x check_requirements.sh run_local.sh
+./check_requirements.sh
+./run_local.sh
+```
+
+### What happens?
+1. MongoDB starts in a Docker container
+2. All export steps run automatically
+3. Results are saved to `./exports/` and `./releases/`
+
+📖 **For detailed instructions including GitHub token setup, see [QUICKSTART.md](QUICKSTART.md)**
+
+
 Contents
 --------
 - Top-level scripts `01_...` to `21_...` implement each step in the pipeline, designed to be run sequentially.
@@ -20,11 +49,27 @@ Contents
   - `ensure_history_collection.py`
   - `run_exports.py`
   - `check_export_module.py`
+- **Docker files**:
+  - `Dockerfile` - Build environment
+  - `docker-compose.yml` - Service orchestration
+  - `run_workflow.sh` - Main workflow runner
+  - `run_local.bat` / `run_local.sh` - Easy launchers
 - GitHub Actions workflow: `.github/workflows/release.yml` for CI-driven builds and releases.
 
 
-Prerequisites (local)
----------------------
+## Running Options
+
+### Option 1: Docker (Recommended)
+See [Quick Start with Docker](#-quick-start-with-docker-recommended) above.
+
+### Option 2: GitHub Actions
+The workflow at `.github/workflows/release.yml` provides a full CI pipeline. Trigger it manually (workflow_dispatch) or configure schedules/conditions as desired.
+
+### Option 3: Manual Local Setup
+For advanced users who want to run without Docker.
+
+Prerequisites (manual local setup)
+----------------------------------
 You can run the pipeline on Linux or macOS. The GitHub Actions workflow shows a fully automated reference run. For a local run, install or ensure access to:
 
 - Bash and coreutils
@@ -37,8 +82,8 @@ You can run the pipeline on Linux or macOS. The GitHub Actions workflow shows a 
 The scripts will attempt to install/prepare some tools automatically, but having the above ready smooths the process.
 
 
-Quick Start (local)
--------------------
+Quick Start (manual local setup)
+---------------------------------
 The scripts are designed to be executed in order. A minimal local end-to-end run using the small sample dump looks like this:
 
 1) Compute a timestamp used for naming artifacts
@@ -132,6 +177,25 @@ Some scripts accept environment variables to tweak behavior. Common ones include
 - `RELEASE_TAG` / `RELEASE_NAME` – Override the computed tag/name for releases
 
 Refer to each script for any additional, script-specific variables.
+
+
+Docker Environment Variables
+-----------------------------
+When running with Docker, customize settings in `.env`:
+
+```env
+# Timezone for timestamps (IANA name)
+TZ_NAME=Asia/Jerusalem
+
+# Optional: GitHub token for creating releases
+# GH_TOKEN=your_github_token_here
+```
+
+The following are set automatically by docker-compose:
+- `MONGO_HOST=mongodb` (container name)
+- `MONGO_PORT=27017`
+- `MONGO_DB_NAME=sefaria`
+- `DJANGO_SETTINGS_MODULE=sefaria.settings`
 
 
 Running in GitHub Actions

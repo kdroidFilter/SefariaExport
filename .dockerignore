@@ -1,0 +1,45 @@
+# Git
+.git
+.github
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.pytest_cache
+.coverage
+
+# Project specific
+exports/
+releases/
+mongo_dump_pkg/
+Sefaria-Project/
+ts.txt
+ts_env.sh
+
+# Docker
+.dockerignore
+docker-compose.yml
+Dockerfile
+
+# Documentation
+README_DOCKER.md
+*.md
+
+# Environment
+.env
+.env.*

@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: sefaria-mongodb
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ ping: 1 })"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - sefaria-network
+
+  sefaria-export:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TZ_NAME: ${TZ_NAME:-Asia/Jerusalem}
+    container_name: sefaria-export
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      - TZ_NAME=${TZ_NAME:-Asia/Jerusalem}
+      - DJANGO_SETTINGS_MODULE=sefaria.settings
+      - MONGO_HOST=mongodb
+      - MONGO_PORT=27017
+      - MONGO_DB_NAME=sefaria
+      - PIP_NO_CACHE_DIR=1
+      - PIP_DISABLE_PIP_VERSION_CHECK=1
+      - GH_TOKEN=${GH_TOKEN}
+    volumes:
+      - ./exports:/workspace/exports
+      - ./releases:/workspace/releases
+    networks:
+      - sefaria-network
+
+networks:
+  sefaria-network:
+    driver: bridge

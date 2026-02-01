@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMBINED="sefaria-exports-${TS_STAMP}.tar.zst"
+# Load timestamp
+TS_ENV_FILE="${GITHUB_WORKSPACE:-$PWD}/ts_env.sh"
+if [ -f "${TS_ENV_FILE}" ]; then
+  source "${TS_ENV_FILE}"
+fi
+
+: "${TS_STAMP:?TS_STAMP not set. Run 01_compute_timestamp.sh first}"
+COMBINED="releases/sefaria-exports-${TS_STAMP}.tar.zst"
 
 if [ ! -f "${COMBINED}" ]; then
   echo "❌ Archive not found: ${COMBINED}"

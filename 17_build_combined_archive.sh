@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Load timestamp
+TS_ENV_FILE="${GITHUB_WORKSPACE:-$PWD}/ts_env.sh"
+if [ -f "${TS_ENV_FILE}" ]; then
+  source "${TS_ENV_FILE}"
+fi
+
 cd "${GITHUB_WORKSPACE:-$PWD}"
-COMBINED="sefaria-exports-${TS_STAMP}.tar.zst"
+
+# Create releases directory if it doesn't exist
+mkdir -p releases
+
+: "${TS_STAMP:?TS_STAMP not set. Run 01_compute_timestamp.sh first}"
+COMBINED="releases/sefaria-exports-${TS_STAMP}.tar.zst"
 
 # Verify that the exports directory contains files
 FILE_COUNT=$(find exports -type f 2>/dev/null | wc -l)
