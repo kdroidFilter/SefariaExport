@@ -8,18 +8,21 @@ ARG TZ_NAME=Asia/Jerusalem
 ENV TZ=${TZ_NAME}
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# Install Python (Ubuntu default) and basic tools
+# Install Python 3.9 and basic tools
 RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-dev \
+    python3.9 \
+    python3.9-dev \
     python3-pip \
-    python-is-python3 \
     git \
     curl \
     wget \
     software-properties-common \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.9 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1
 
 # Environment variables
 ENV DJANGO_SETTINGS_MODULE=sefaria.settings
