@@ -1,4 +1,4 @@
-name: Python 3.9 + MongoDB + Sefaria Export (single-run • zstd ultra • split<2GB)
+name: Sefaria Export via Docker Compose
 
 on:
   workflow_dispatch:
@@ -13,31 +13,11 @@ permissions:
 
 env:
   TZ_NAME: ${{ inputs.timezone || 'Asia/Jerusalem' }}
-  DJANGO_SETTINGS_MODULE: sefaria.settings
-  MONGO_HOST: 127.0.0.1
-  MONGO_PORT: 27017
-  MONGO_DB_NAME: sefaria
-  PIP_NO_CACHE_DIR: "1"
-  PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
   export_release:
     runs-on: self-hosted
     timeout-minutes: 4320
-    defaults:
-      run:
-        working-directory: ${{ github.workspace }}
-
-    services:
-      mongodb:
-        image: mongo:6.0
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd="mongosh --eval 'db.runCommand({ ping: 1 })'"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=20
 
     steps:
       - name: Checkout
@@ -46,137 +26,26 @@ jobs:
           fetch-depth: 1
           clean: true
 
-      - name: Debug workspace
-        run: |
-          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
-          echo "PWD=$(pwd)"
-          echo "Listing top-level files:" && ls -la
-          echo "Looking for scripts:"
-          find . -name "*.sh" -type f | head -10
-          echo "Current directory structure:"
-          ls -la ./
-
       - name: Compute release timestamp
         id: ts
         run: |
-          if [ -f "./01_compute_timestamp.sh" ]; then
-            chmod +x ./01_compute_timestamp.sh
-            bash ./01_compute_timestamp.sh
-          else
-            echo "Script not found at ./01_compute_timestamp.sh"
-            echo "Files in current directory:"
-            ls -la
-            exit 1
-          fi
+          TS_STAMP=$(TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M')
+          echo "stamp=$TS_STAMP" >> "$GITHUB_OUTPUT"
+          echo "Timestamp: $TS_STAMP"
 
-      - name: Install base tools
-        run: |
-          chmod +x ./02_install_base_tools.sh
-          bash ./02_install_base_tools.sh
-
-      - name: Set up Python 3.9
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-
-      - name: Install MongoDB Database Tools (mongorestore)
-        run: |
-          chmod +x ./03_install_mongo_tools.sh
-          bash ./03_install_mongo_tools.sh
-
-      - name: Download small Mongo dump
-        run: |
-          chmod +x ./04_download_small_dump.sh
-          bash ./04_download_small_dump.sh
-
-      - name: Clone Sefaria-Project
-        run: |
-          chmod +x ./05_clone_sefaria_project.sh
-          bash ./05_clone_sefaria_project.sh
-
-      - name: Install build deps (google-re2)
-        run: |
-          chmod +x ./06_install_build_deps.sh
-          bash ./06_install_build_deps.sh
-
-      - name: Pin google-re2 and install requirements
-        id: pip_install
-        continue-on-error: true
-        run: |
-          chmod +x ./07_pip_install_requirements.sh
-          bash ./07_pip_install_requirements.sh
-
-      - name: Fallback built-google-re2
-        if: ${{ steps.pip_install.outcome == 'failure' }}
-        run: |
-          chmod +x ./08_fallback_built_google_re2.sh
-          bash ./08_fallback_built_google_re2.sh
-
-      - name: Create exports directory
-        run: |
-          chmod +x ./09_create_exports_dir.sh
-          bash ./09_create_exports_dir.sh
-
-      - name: Create local_settings.py (SEFARIA_DB, export path)
-        run: |
-          chmod +x ./10_create_local_settings.sh
-          bash ./10_create_local_settings.sh
-
-      - name: Wait for MongoDB TCP
-        run: |
-          chmod +x ./11_wait_for_mongodb.sh
-          bash ./11_wait_for_mongodb.sh
-
-      - name: Restore database from dump
-        run: |
-          chmod +x ./12_restore_db_from_dump.sh
-          bash ./12_restore_db_from_dump.sh
-
-      - name: Check export module available
-        run: |
-          chmod +x ./13_check_export_module.sh
-          bash ./13_check_export_module.sh
-
-      - name: Run export functions
-        run: |
-          chmod +x ./14_run_exports.sh
-          bash ./14_run_exports.sh
-
-      - name: Detailed export verification
-        run: |
-          chmod +x ./15_verify_exports.sh
-          bash ./15_verify_exports.sh
-
-      - name: Drop DB (free space)
-        run: |
-          chmod +x ./16_drop_db.sh
-          bash ./16_drop_db.sh
-
-      - name: Cleanup exports — remove 'English' directories
-        run: |
-          chmod +x ./17a_remove_english_in_exports.sh
-          bash ./17a_remove_english_in_exports.sh
-
-      - name: Cleanup exports — flatten 'Hebrew' directories
-        run: |
-          chmod +x ./17b_flatten_hebrew_in_exports.sh
-          bash ./17b_flatten_hebrew_in_exports.sh
-
-      - name: Build combined tar.zst from exports directory
+      - name: Run export pipeline via Docker Compose
         env:
           TS_STAMP: ${{ steps.ts.outputs.stamp }}
-        run: |
-          chmod +x ./17_build_combined_archive.sh
-          bash ./17_build_combined_archive.sh
+        run: docker compose up --build --abort-on-container-exit
 
-      - name: Split archive into <2GB parts
-        env:
-          TS_STAMP: ${{ steps.ts.outputs.stamp }}
-        run: |
-          chmod +x ./18_split_archive.sh
-          bash ./18_split_archive.sh
+      - name: Stop and clean up containers
+        if: always()
+        run: docker compose down --volumes --remove-orphans
 
-      - name: Ensure gh cli
+      - name: Move archives to workspace root
+        run: mv ./output/sefaria-exports-*.tar.zst* ./ 2>/dev/null || true
+
+      - name: Ensure gh CLI
         run: |
           chmod +x ./19_ensure_gh_cli.sh
           bash ./19_ensure_gh_cli.sh
@@ -189,7 +58,7 @@ jobs:
           chmod +x ./20_create_or_update_release.sh
           bash ./20_create_or_update_release.sh
 
-      - name: Upload parts (or single file)
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TS_STAMP: ${{ steps.ts.outputs.stamp }}

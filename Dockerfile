@@ -76,47 +76,12 @@ COPY *.sh *.py ./
 # Make all scripts executable
 RUN chmod +x *.sh
 
-# Create exports directory
-RUN mkdir -p /app/exports
+# Create exports and output directories
+RUN mkdir -p /app/exports /app/output
 ENV SEFARIA_EXPORT_PATH=/app/exports
 
-# Create entrypoint script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-echo "=== Sefaria Export Pipeline ==="\n\
-echo "MongoDB: $MONGO_HOST:$MONGO_PORT"\n\
-echo "Database: $MONGO_DB_NAME"\n\
-echo ""\n\
-\n\
-# Wait for MongoDB\n\
-echo "Waiting for MongoDB..."\n\
-./11_wait_for_mongodb.sh\n\
-\n\
-# Run the export pipeline\n\
-echo "Starting export pipeline..."\n\
-\n\
-./01_compute_timestamp.sh\n\
-./04_download_small_dump.sh\n\
-./05_clone_sefaria_project.sh\n\
-./06_install_build_deps.sh || true\n\
-./07_pip_install_requirements.sh || ./08_fallback_built_google_re2.sh\n\
-./09_create_exports_dir.sh\n\
-./10_create_local_settings.sh\n\
-./12_restore_db_from_dump.sh\n\
-./13_check_export_module.sh\n\
-./14_run_exports.sh\n\
-./15_verify_exports.sh\n\
-./16_drop_db.sh\n\
-./17a_remove_english_in_exports.sh\n\
-./17b_flatten_hebrew_in_exports.sh\n\
-./17_build_combined_archive.sh\n\
-./18_split_archive.sh\n\
-\n\
-echo ""\n\
-echo "=== Export complete! ==="\n\
-echo "Archives available in /app/exports"\n\
-ls -lah /app/exports/\n\
-' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+# Copy entrypoint script
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 ENTRYPOINT ["/app/entrypoint.sh"]
