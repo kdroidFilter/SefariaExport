@@ -108,6 +108,47 @@ def export_versions(export_base: str) -> None:
     print(f"✅ versions.json: {len(records)} Hebrew versions -> {path}")
 
 
+AUTHOR_PROPERTIES = (
+    "birthYear",
+    "birthYearIsApprox",
+    "deathYear",
+    "deathYearIsApprox",
+    "era",
+)
+
+
+def export_authors(export_base: str) -> None:
+    """Write `authors.json`: the topic of every author referenced by an index.
+
+    The schemas only carry each author's slug and primary names. This adds the
+    Hebrew alternate titles (רעק"א, ראב"ע...) and the life data the app shows on
+    an author card, from the same Mongo snapshot. Values are written as-is.
+    """
+    import json
+    from sefaria.system.database import db
+
+    slugs = sorted(s for s in db.index.distinct("authors") if isinstance(s, str) and s)
+    records = []
+    for doc in db.topics.find({"slug": {"$in": slugs}}, {"_id": 0, "slug": 1, "titles": 1, "properties": 1}):
+        properties = doc.get("properties") or {}
+        records.append({
+            "slug": doc["slug"],
+            "heTitles": [
+                t["text"] for t in doc.get("titles") or []
+                if t.get("lang") == "he" and t.get("text")
+            ],
+            **{name: (properties.get(name) or {}).get("value") for name in AUTHOR_PROPERTIES},
+        })
+    if not records:
+        raise RuntimeError("no author topic found in db.topics")
+    records.sort(key=lambda r: r["slug"])
+
+    path = os.path.join(export_base, "authors.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=1)
+    print(f"✅ authors.json: {len(records)}/{len(slugs)} author topics -> {path}")
+
+
 def flatten_hebrew_dirs(export_base: str) -> None:
     """Move the contents of every `.../Hebrew/` directory one level up.
 
@@ -174,6 +215,9 @@ def main() -> int:
 
         print(f"\n{'='*60}\n▶️  Running export_versions...\n{'='*60}")
         export_versions(export_base)
+
+        print(f"\n{'='*60}\n▶️  Running export_authors...\n{'='*60}")
+        export_authors(export_base)
     except Exception as e:  # pragma: no cover
         print(f"❌ export step failed: {e}")
         traceback.print_exc()
