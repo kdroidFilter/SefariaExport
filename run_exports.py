@@ -69,6 +69,45 @@ def run_merged_export_he_only(ex) -> None:
     print(f"✅ merged export done: written={written}, skipped={skipped}, errors={errored}")
 
 
+VERSION_FIELDS = (
+    "title",
+    "versionTitle",
+    "versionTitleInHebrew",
+    "versionSource",
+    "license",
+    "actualLanguage",
+    "digitizedBySefaria",
+)
+
+
+def export_versions(export_base: str) -> None:
+    """Write `versions.json`: the metadata of every Hebrew text version.
+
+    `merged.json` only lists `[versionTitle, versionSource]` pairs and drops the
+    license. Dumping the raw version records from the same Mongo snapshot lets
+    the SefariaSqlite generator join them back exactly on
+    (title, versionTitle). Values are written as-is (no license normalization):
+    mapping Sefaria's free-text licenses is the generator's job.
+    """
+    import json
+    from sefaria.system.database import db
+
+    projection = {field: 1 for field in VERSION_FIELDS}
+    projection["_id"] = 0
+    records = [
+        {field: doc.get(field) for field in VERSION_FIELDS}
+        for doc in db.texts.find({"language": "he"}, projection)
+    ]
+    if not records:
+        raise RuntimeError("no Hebrew version found in db.texts")
+    records.sort(key=lambda r: (r["title"] or "", r["versionTitle"] or ""))
+
+    path = os.path.join(export_base, "versions.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=1)
+    print(f"✅ versions.json: {len(records)} Hebrew versions -> {path}")
+
+
 def flatten_hebrew_dirs(export_base: str) -> None:
     """Move the contents of every `.../Hebrew/` directory one level up.
 
@@ -132,6 +171,9 @@ def main() -> int:
             print(f"\n{'='*60}\n▶️  Running {fn_name}...\n{'='*60}")
             getattr(ex, fn_name)()
             print(f"✅ {fn_name} completed")
+
+        print(f"\n{'='*60}\n▶️  Running export_versions...\n{'='*60}")
+        export_versions(export_base)
     except Exception as e:  # pragma: no cover
         print(f"❌ export step failed: {e}")
         traceback.print_exc()
